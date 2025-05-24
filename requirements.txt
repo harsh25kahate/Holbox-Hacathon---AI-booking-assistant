@@ -1,0 +1,13 @@
+gradio==4.19.2
+fastapi==0.110.0
+uvicorn==0.27.1
+SpeechRecognition==3.10.1
+pyttsx3==2.90
+scikit-learn==1.4.1.post1
+sentence-transformers==2.5.1
+python-multipart==0.0.9
+numpy==1.26.4
+pandas==2.2.1
+python-dateutil==2.8.2
+pytz==2024.1
+SQLAlchemy==2.0.27 
