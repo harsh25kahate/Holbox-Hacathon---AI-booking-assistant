@@ -1,8 +1,12 @@
+from typing import List, Dict
 import speech_recognition as sr
 import pyttsx3
 from typing import Optional
 import time
 from difflib import get_close_matches
+from datetime import datetime, timedelta
+from ai_agent.scheduler import SchedulingAgent
+from voice.voice_response import VoiceResponse
 
 def fuzzy_match(text, keywords):
     for keyword in keywords:
@@ -20,6 +24,8 @@ class VoiceHandler:
     def __init__(self):
         self.recognizer = sr.Recognizer()
         self.engine = pyttsx3.init()
+        self.scheduler = SchedulingAgent()
+        self.voice_response = VoiceResponse()
         # Adjust recognition parameters for better sensitivity
         self.recognizer.energy_threshold = 100  # Even lower threshold for easier voice detection
         self.recognizer.dynamic_energy_threshold = True
@@ -27,168 +33,178 @@ class VoiceHandler:
         self.recognizer.phrase_threshold = 0.1  # More sensitive to phrases
         self.recognizer.non_speaking_duration = 0.2  # Shorter duration for non-speaking detection
 
-    def process_audio_file(self, audio_file_path: str) -> Optional[str]:
+    def process_audio_file(self, audio_file_path: str, max_attempts: int = 3) -> str:
         """
-        Process audio file from Gradio and convert it to text
+        Process audio file and convert to text
         """
-        try:
-            with sr.AudioFile(audio_file_path) as source:
-                print("Processing audio file...")
-                audio = self.recognizer.record(source)
-                
-                try:
-                    # Try Google's service with explicit language
-                    text = self.recognizer.recognize_google(
-                        audio,
-                        language='en-US',
-                        show_all=True
-                    )
-                    
-                    if isinstance(text, dict) and 'alternative' in text:
-                        # Get the most confident result
-                        best_result = text['alternative'][0]['transcript']
-                        confidence = text['alternative'][0].get('confidence', 0)
-                        
-                        print(f"✅ Recognized: {best_result} (Confidence: {confidence:.2f})")
-                        return best_result
-                    else:
-                        print("❌ No clear speech detected in the audio file.")
-                        return None
-                        
-                except sr.UnknownValueError:
-                    print("❌ Could not understand audio clearly. Please speak louder and more clearly.")
-                    return None
-                except sr.RequestError as e:
-                    print(f"❌ Service error: {e}")
-                    return None
-                    
-        except Exception as e:
-            print(f"❌ Error processing audio file: {e}")
-            return None
+        for attempt in range(max_attempts):
+            try:
+                with sr.AudioFile(audio_file_path) as source:
+                    audio = self.recognizer.record(source)
+                    text = self.recognizer.recognize_google(audio)
+                    return text.lower()
+            except sr.UnknownValueError:
+                if attempt < max_attempts - 1:
+                    print("Trying again...")
+                    continue
+                return None
+            except Exception as e:
+                print(f"Error processing audio: {e}")
+                return None
 
     def process_voice_command(self, audio_file_path: str = None) -> dict:
         """
         Process voice command and extract appointment details
         """
         if audio_file_path is None:
+            response = "No audio detected. Please try recording again."
+            self.voice_response.speak(response)
             return {
                 'success': False,
-                'message': "No audio file provided"
+                'message': response
+            }
+            
+        if not isinstance(audio_file_path, str) or not audio_file_path.strip():
+            response = "Invalid audio input. Please try recording again."
+            self.voice_response.speak(response)
+            return {
+                'success': False,
+                'message': response
             }
             
         text = self.process_audio_file(audio_file_path)
         
         if text is None:
+            response = "Could not understand audio. Please speak clearly and try again."
+            self.voice_response.speak(response)
             return {
                 'success': False,
-                'message': "Could not understand audio. Please speak clearly and try again."
+                'message': response
             }
             
-        # Process the recognized text
-        text = text.lower()
-        details = {
-            'provider': None,
-            'date': None,
-            'time': None
-        }
-        
-        # Extract provider with more flexible matching
-        provider_keywords = {
-            'smith': 'Dr. Smith',
-            'dr smith': 'Dr. Smith',
-            'doctor smith': 'Dr. Smith',
-            'johnson': 'Dr. Johnson',
-            'dr johnson': 'Dr. Johnson',
-            'doctor johnson': 'Dr. Johnson',
-            'williams': 'Ms. Williams',
-            'ms williams': 'Ms. Williams',
-            'miss williams': 'Ms. Williams'
-        }
-        
-        # Try exact matches first
-        for keyword, provider in provider_keywords.items():
-            if keyword in text:
-                details['provider'] = provider
-                break
-                
-        # If no exact match, try fuzzy matching
-        if not details['provider']:
-            words = text.split()
-            matches = fuzzy_match(text, provider_keywords)
-            if matches:
-                details['provider'] = matches
+        # Extract appointment details
+        details = self.extract_appointment_details(text)
+        if not details['success']:
+            self.voice_response.speak(details['message'])
+            return details
             
-        # Extract date with more flexible matching
-        date_keywords = {
-            'tomorrow': 'tomorrow',
-            'today': 'today',
-            'next monday': 'next Monday',
-            'next tuesday': 'next Tuesday',
-            'next wednesday': 'next Wednesday',
-            'next thursday': 'next Thursday',
-            'next friday': 'next Friday',
-            'monday': 'next Monday',
-            'tuesday': 'next Tuesday',
-            'wednesday': 'next Wednesday',
-            'thursday': 'next Thursday',
-            'friday': 'next Friday'
-        }
-        
-        # Try exact matches first
-        for keyword, date in date_keywords.items():
-            if keyword in text:
-                details['date'] = date
-                break
-                
-        # If no exact match, try fuzzy matching
-        if not details['date']:
-            words = text.split()
-            matches = fuzzy_match(text, date_keywords)
-            if matches:
-                details['date'] = matches
-            
-        # Extract time with more flexible matching
-        time_keywords = {
-            'morning': 'morning (9 AM - 12 PM)',
-            'afternoon': 'afternoon (1 PM - 5 PM)',
-            'evening': 'evening (5 PM - 8 PM)',
-            'am': 'morning (9 AM - 12 PM)',
-            'pm': 'afternoon (1 PM - 5 PM)'
-        }
-        
-        # Try exact matches first
-        for keyword, time in time_keywords.items():
-            if keyword in text:
-                details['time'] = time
-                break
-                
-        # If no exact match, try fuzzy matching
-        if not details['time']:
-            words = text.split()
-            matches = fuzzy_match(text, time_keywords)
-            if matches:
-                details['time'] = matches
-            
-        # Try to find specific time
-        import re
-        time_match = re.search(r'(\d{1,2})(?:\s*:\s*\d{2})?\s*(am|pm)', text)
-        if time_match:
-            time_str = time_match.group()
-            print(f"Extracted time from regex: {time_str}")
-            details['time'] = time_str
-                
-        # Check if we got any details
-        if not any(details.values()):
+        # Check availability
+        provider_id = self.scheduler.get_provider_id(details['provider'])
+        if not provider_id:
+            response = f"Sorry, I couldn't find {details['provider']} in our system."
+            self.voice_response.speak(response)
             return {
                 'success': False,
-                'message': "Could not understand appointment details. Please include provider name, date, and time."
+                'message': response
             }
+            
+        # Check slot availability
+        availability = self.scheduler.suggest_slots(
+            provider_id,
+            details['date'],
+            details['time']
+        )
+        
+        # Generate and speak the appropriate response
+        response = self.voice_response.generate_availability_response(availability)
+        self.voice_response.speak(response)
+        
+        if availability.get('available'):
+            # If slot is available, book it
+            booking = self.scheduler.book_appointment(
+                "User",  # Replace with actual user name
+                "user@example.com",  # Replace with actual email
+                provider_id,
+                availability['slot']['slot_id']
+            )
+            
+            # Generate and speak booking confirmation
+            confirmation = self.voice_response.generate_booking_response(booking)
+            self.voice_response.speak(confirmation)
+            return booking
             
         return {
-            'success': True,
-            'message': "Successfully processed your request",
-            'details': details
+            'success': False,
+            'message': response,
+            'alternatives': availability.get('alternative_slots', [])
         }
+
+    def extract_appointment_details(self, text: str) -> Dict:
+        """
+        Extract appointment details from text
+        """
+        try:
+            # Common date keywords
+            date_keywords = {
+                'today': datetime.now().date(),
+                'tomorrow': datetime.now().date() + timedelta(days=1),
+                'day after tomorrow': datetime.now().date() + timedelta(days=2)
+            }
+            
+            # Time of day mappings
+            time_mappings = {
+                'morning': '9 AM',
+                'afternoon': '2 PM',
+                'evening': '5 PM'
+            }
+            
+            # Extract provider name
+            provider = None
+            if 'with' in text:
+                provider = text.split('with')[1].split()[0]
+                if 'dr' in provider or 'dr.' in provider:
+                    provider = text.split('with')[1].split('dr')[1].strip()
+                    provider = f"Dr. {provider}"
+            
+            if not provider:
+                return {
+                    'success': False,
+                    'message': "Please specify a doctor's name. For example, 'Book an appointment with Dr. Smith'"
+                }
+            
+            # Extract date
+            date = None
+            for keyword, value in date_keywords.items():
+                if keyword in text:
+                    date = value
+                    break
+                    
+            if not date:
+                # Try to find a specific date mention
+                # This is a simplified version - you might want to add more sophisticated date parsing
+                return {
+                    'success': False,
+                    'message': "Please specify a date. You can say 'today', 'tomorrow', or 'day after tomorrow'"
+                }
+            
+            # Extract time
+            time = None
+            for period, default_time in time_mappings.items():
+                if period in text:
+                    time = default_time
+                    break
+                    
+            if not time:
+                # Try to find specific time mention
+                # This is a simplified version - you might want to add more sophisticated time parsing
+                return {
+                    'success': False,
+                    'message': "Please specify a time. You can say 'morning', 'afternoon', or 'evening'"
+                }
+            
+            return {
+                'success': True,
+                'provider': provider,
+                'date': date,
+                'time': time
+            }
+            
+        except Exception as e:
+            print(f"Error extracting appointment details: {e}")
+            return {
+                'success': False,
+                'message': "I couldn't understand the appointment details. Please try again with a clear provider name, date, and time."
+            }
 
     def speak(self, text: str):
         """
@@ -256,8 +272,8 @@ class VoiceHandler:
                             print("❌ Could not understand audio clearly. Please speak louder and more clearly.")
                             if attempt < max_attempts - 1:
                                 print("Trying again...")
-                                    continue
-                                return "Could not understand audio. Please speak clearly and try again."
+                                continue
+                            return "Could not understand audio. Please speak clearly and try again."
                         except sr.RequestError as e:
                             print(f"❌ Service error: {e}")
                             return "Could not access speech recognition service. Please check your internet connection."
@@ -276,3 +292,97 @@ class VoiceHandler:
                 return f"Error occurred: {str(e)}. Please try again."
         
         return "Failed to recognize speech after multiple attempts. Please try again."
+
+    def book_from_suggestions(self, text: str, suggested_slots: List[Dict], scheduler: SchedulingAgent) -> str:
+        """
+        Book an appointment from suggested alternative slots
+        """
+        try:
+            # Check if user specified a slot number
+            import re
+            slot_number_match = re.search(r'(?:slot|number|option)?\s*(\d+)', text.lower())
+            
+            if slot_number_match:
+                selected_number = int(slot_number_match.group(1))
+                
+                # Check if the number is valid
+                if 1 <= selected_number <= len(suggested_slots):
+                    selected_slot = suggested_slots[selected_number - 1]
+                    
+                    # Book the appointment
+                    booking_result = scheduler.book_appointment(
+                        provider_id=selected_slot['provider_id'],
+                        slot_id=selected_slot['slot_id'],
+                        user_name="User",  # TODO: Get actual user name
+                        user_email="user@example.com"  # TODO: Get actual user email
+                    )
+                    
+                    if booking_result['success']:
+                        return f"Great! Your appointment is confirmed for {scheduler.format_slot_suggestion(selected_slot)}."
+                    else:
+                        return f"Sorry, couldn't book the appointment: {booking_result['message']}"
+                else:
+                    return f"Please select a valid slot number between 1 and {len(suggested_slots)}."
+            
+            return "Please specify which slot you'd like to book by saying the slot number (e.g., 'book slot 1' or 'number 2')."
+            
+        except Exception as e:
+            print(f"Error booking from suggestions: {e}")
+            return "Sorry, there was an error booking your appointment. Please try again."
+
+    def process_booking_request(self, text: str, scheduler: SchedulingAgent, suggested_slots: List[Dict] = None) -> str:
+        """
+        Process the booking request and handle scheduling
+        """
+        try:
+            # If we have suggested slots, try to book from them
+            if suggested_slots:
+                return self.book_from_suggestions(text, suggested_slots, scheduler)
+            
+            # Extract date and time from text
+            extracted_date = self.extract_date(text)
+            extracted_time = self.extract_time(text)
+            provider_name = self.extract_provider_name(text)
+            
+            if not all([extracted_date, extracted_time, provider_name]):
+                return "I couldn't understand all the details. Please specify the doctor's name, date, and time for the appointment."
+            
+            # Get provider ID
+            provider_id = scheduler.get_provider_id(provider_name)
+            if not provider_id:
+                return f"Sorry, I couldn't find {provider_name} in our system. Please check the name and try again."
+            
+            # Check availability and get suggestions
+            result = scheduler.suggest_slots(provider_id, extracted_date, extracted_time)
+            
+            if result['available']:
+                # Book the slot
+                slot = result['slot']
+                booking_result = scheduler.book_appointment(
+                    provider_id=provider_id,
+                    slot_id=slot['slot_id'],
+                    user_name="User",  # TODO: Get actual user name
+                    user_email="user@example.com"  # TODO: Get actual user email
+                )
+                
+                if booking_result['success']:
+                    return f"Great! Your appointment is confirmed for {scheduler.format_slot_suggestion(slot)}."
+                else:
+                    return booking_result['message']
+            else:
+                # Store suggested slots for future reference
+                self.last_suggested_slots = result['alternative_slots']
+                
+                # Suggest alternative slots
+                response = [result['message'], "\n\nHere are some alternative available slots:"]
+                
+                for i, slot in enumerate(result['alternative_slots'], 1):
+                    response.append(f"\n{i}. {scheduler.format_slot_suggestion(slot)}")
+                
+                response.append("\n\nTo book a slot, just say its number (e.g., 'book slot 1' or 'number 2').")
+                
+                return "".join(response)
+                
+        except Exception as e:
+            print(f"Error processing booking request: {e}")
+            return "Sorry, there was an error processing your request. Please try again."

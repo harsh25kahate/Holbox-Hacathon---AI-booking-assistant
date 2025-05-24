@@ -2,6 +2,7 @@ import gradio as gr
 import datetime
 from voice.speech_recognition import VoiceHandler
 from ai_agent.scheduler import SchedulingAgent
+from notifications.notifier import NotificationSystem
 from database.database import SessionLocal
 from database.models import User, ServiceProvider, Appointment, TimeSlot
 
@@ -9,6 +10,7 @@ class AppointmentUI:
     def __init__(self):
         self.voice_handler = VoiceHandler()
         self.scheduler = SchedulingAgent()
+        self.notifier = NotificationSystem()
         
     def process_voice_booking(self, audio):
         """
@@ -24,18 +26,69 @@ class AppointmentUI:
                 return result['message']
                 
             details = result['details']
-            response_parts = ["I understood your request:"]
             
-            if details['provider']:
-                response_parts.append(f"Provider: {details['provider']}")
-            if details['date']:
-                response_parts.append(f"Date: {details['date']}")
-            if details['time']:
-                response_parts.append(f"Time: {details['time']}")
+            # Get provider ID
+            provider_id = self.scheduler.get_provider_id(details['provider'])
+            if not provider_id:
+                return f"Sorry, I couldn't find {details['provider']} in our system."
+            
+            # Parse date
+            try:
+                if details['date'].lower() == 'tomorrow':
+                    preferred_date = datetime.date.today() + datetime.timedelta(days=1)
+                elif details['date'].lower() == 'today':
+                    preferred_date = datetime.date.today()
+                else:
+                    # Handle "next Monday", "next Tuesday", etc.
+                    day_name = details['date'].lower().replace('next ', '')
+                    days = {'monday': 0, 'tuesday': 1, 'wednesday': 2, 
+                           'thursday': 3, 'friday': 4}
+                    today = datetime.date.today()
+                    days_ahead = days[day_name] - today.weekday()
+                    if days_ahead <= 0:
+                        days_ahead += 7
+                    preferred_date = today + datetime.timedelta(days=days_ahead)
+            except:
+                return "Sorry, I couldn't understand the date. Please try again."
+            
+            # Find optimal slot
+            optimal_slot = self.scheduler.find_optimal_slot(
+                provider_id, 
+                preferred_date,
+                details['time']
+            )
+            
+            if not optimal_slot:
+                return f"Sorry, no available slots found for {details['provider']} on {preferred_date}. Please try a different date or time."
+            
+            # Book the appointment
+            booking_result = self.scheduler.book_appointment(
+                "Voice Booking User",  # Temporary name
+                "voice@example.com",   # Temporary email
+                provider_id,
+                optimal_slot['slot_id']
+            )
+            
+            if booking_result['success']:
+                # Send confirmation notification
+                self.notifier.send_confirmation({
+                    'email': "voice@example.com",  # Temporary email
+                    'provider': details['provider'],
+                    'date': booking_result['details']['date'],
+                    'time': booking_result['details']['time']
+                })
                 
-            response_parts.append("\nIs this correct? If yes, please proceed to Manual Booking tab to complete your booking.")
-            
-            return "\n".join(response_parts)
+                return f"""Great! I've booked your appointment:
+Provider: {details['provider']}
+Date: {booking_result['details']['date']}
+Time: {booking_result['details']['time']}
+
+Your appointment is confirmed! You'll receive a confirmation email shortly.
+
+Would you like to provide your email for appointment reminders? Just say 'My email is example@email.com'"""
+            else:
+                return f"Sorry, I couldn't book the appointment: {booking_result['message']}"
+                
         except Exception as e:
             return f"Error processing voice: {str(e)}. Please try again."
     
@@ -104,29 +157,26 @@ class AppointmentUI:
                             type="filepath",
                             label="Click to start recording",
                             streaming=False,
-                            elem_id="voice_input"
+                            elem_id="voice_input",
+                            format="wav"  # Specify WAV format for better compatibility
                         )
                     
                 voice_output = gr.Textbox(
                     label="Voice Recognition Result",
-                    lines=5
+                    lines=5,
+                    value="Waiting for voice input..."  # Default message
                 )
                 
-                process_btn = gr.Button("Process Voice Command")
-                
-                def initialize_mic():
-                    return None
-                
-                # Initialize microphone on page load
-                interface.load(
-                    fn=initialize_mic,
-                    inputs=[],
-                    outputs=[audio_input]
-                )
-                
-                process_btn.click(
+                # Remove the separate process button and directly process on audio change
+                audio_input.change(
                     fn=self.process_voice_booking,
                     inputs=[audio_input],
+                    outputs=voice_output
+                )
+                
+                # Clear message when starting new recording
+                audio_input.start_recording(
+                    fn=lambda: "Recording... Speak now",
                     outputs=voice_output
                 )
             
